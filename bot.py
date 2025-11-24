@@ -5,14 +5,12 @@ from bs4 import BeautifulSoup
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-import time
-import random
 from datetime import datetime, timedelta
 import re
 
 # --- КОНФИГУРАЦИЯ ---
-API_TOKEN = '8410212460:AAGW8aqzXbatKpXYyLq6Tog7gdNIy4UBwJQ'  # тестовый токен, как у тебя
-BASE_URL = "https://tight-poetry-a5b0.dmitryhritsun.workers.dev/cherga"
+API_TOKEN = '8410212460:AAGW8aqzXbatKpXYyLq6Tog7gdNIy4UBwJQ'  # тестовый токен
+ALERTS_URL = "https://alerts.org.ua/poltavska-oblast/"
 
 # Настройка логов
 logging.basicConfig(level=logging.INFO)
@@ -27,187 +25,105 @@ user_subscriptions = {}
 # Кэш расписания, чтобы не дергать сайт слишком часто
 # Формат: { "2-1": {"text": str, "time_periods": list[dict], "timestamp": datetime} }
 SCHEDULE_CACHE = {}
-CACHE_TTL_MINUTES = 10  # запрашиваем сайт не чаще, чем раз в 10 минут
+CACHE_TTL_MINUTES = 10  # данные с сайта обновляем раз в ~10 минут для каждой групи
 
 
-# --- ОБЩИЙ ПАРСЕР HTML ---
+# --- ПАРСЕР alerts.org.ua ---
 
+def get_schedule_alerts(queue: str, subgroup: str):
+    """
+    Парсим графік з alerts.org.ua для заданої групи, напр. queue='2', subgroup='1' → 'Група 2.1'.
+    Повертаємо (текст для користувача, список періодів з відключеннями/включеннями).
+    """
+    group_code = f"{queue}.{subgroup}"  # '2.1'
 
-def parse_schedule_html(html: str, queue: str, subgroup: str):
-    """Общий парсер HTML для обеих функций (requests / cloudscraper)."""
-    soup = BeautifulSoup(html, 'html.parser')
-    container = soup.find('div', class_='periods_items')
+    try:
+        resp = requests.get(ALERTS_URL, timeout=15)
+        if resp.status_code != 200:
+            logging.error(f"alerts.org.ua status {resp.status_code}")
+            return "❌ Помилка отримання даних з alerts.org.ua", []
 
-    if not container:
-        logging.warning("Контейнер 'periods_items' не найден")
-        container = soup.find('div', {'class': lambda x: x and 'period' in x.lower()})
-        if not container:
-            return "✅ Графіка немає або структура сайту змінилася.", []
+        soup = BeautifulSoup(resp.text, "html.parser")
 
-    items = container.find_all('span')
+        # шукаємо потрібну групу
+        target_group = None
+        for group_div in soup.select("div.group"):
+            name_tag = group_div.select_one("b.name")
+            if not name_tag:
+                continue
+            name_text = name_tag.get_text(strip=True)
+            if group_code in name_text:
+                target_group = group_div
+                break
 
-    if not items:
-        return "✅ На сьогодні відключень не заплановано.", []
+        if target_group is None:
+            return f"⚠️ Групу {group_code} не знайдено на alerts.org.ua", []
 
-    result_lines = []
-    time_periods = []
+        result_lines = []
+        periods = []
 
-    for item in items:
-        text = item.get_text(separator=" ", strip=True)
-        text = text.replace("год. год.", "год.").replace("тривалість", "⏳")
+        # перебираємо всі div безпосередньо всередині group (рядки графіка)
+        for div in target_group.find_all("div", recursive=False):
+            classes = div.get("class", [])
+            if "stat" in classes:
+                continue  # ігноруємо статистику
 
-        if text and len(text) > 3:
-            if "З" in text and "до" in text:
-                result_lines.append(f"🔴 {text}")
-                time_match = re.search(r'З\s*(\d{2}):(\d{2})\s*до\s*(\d{2}):(\d{2})', text)
-                if time_match:
-                    start_hour, start_min, end_hour, end_min = time_match.groups()
-                    time_periods.append({
-                        'start': f"{start_hour}:{start_min}",
-                        'end': f"{end_hour}:{end_min}",
-                        'type': 'outage'
-                    })
+            text = div.get_text(" ", strip=True)
+            m = re.search(r"(\d{2}:\d{2})\s*-\s*(\d{2}:\d{2})", text)
+            if not m:
+                continue
+
+            start, end = m.groups()
+
+            # 24:00 → 23:59, щоб не падати на datetime.strptime
+            if end == "24:00":
+                end = "23:59"
+
+            status_tag = div.find("b")
+            status_class = (status_tag.get("class") or [""])[0] if status_tag else ""
+            # статус: on / off / maybe
+            if "off" in status_class:
+                icon = "🔴"
+                status_human = "Світла немає"
+                period_type = "outage"
+            elif "on" in status_class:
+                icon = "🟢"
+                status_human = "Світло є"
+                period_type = "on"
             else:
-                result_lines.append(f"   {text}")
+                icon = "⚪️"
+                status_human = "Можливі коливання"
+                period_type = "maybe"
 
-    if not result_lines:
-        return "✅ Відключень у графіку не знайдено.", []
+            result_lines.append(f"{icon} {start}–{end} • {status_human}")
 
-    header = (
-        f"💡 <b>Графік для {queue} черги ({subgroup} підгрупи)</b>\n"
-        f"📅 <i>Дані з energy-ua.info</i>\n"
-        f"{'─' * 30}\n"
-    )
+            periods.append({
+                "start": start,
+                "end": end,
+                "type": period_type,
+            })
 
-    return header + "\n".join(result_lines), time_periods
+        if not periods:
+            return "✅ Відключень для цієї групи не знайдено.", []
 
-
-# --- ОСНОВНОЙ ПАРСЕР ЧЕРЕЗ requests ---
-
-
-def get_schedule(queue: str, subgroup: str):
-    """Парсит график отключений через обычный requests (fallback)."""
-    url = f"{BASE_URL}/{queue}-{subgroup}"
-
-    user_agents = [
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.1 Safari/605.1.15',
-    ]
-
-    headers = {
-        'User-Agent': random.choice(user_agents),
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-        'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8',
-        'DNT': '1',
-        'Connection': 'keep-alive',
-        'Upgrade-Insecure-Requests': '1',
-        'Pragma': 'no-cache',
-        'Cache-Control': 'no-cache',
-    }
-
-    try:
-        session = requests.Session()
-
-        # Прогреваем сессию
-        try:
-            session.get('https://energy-ua.info/', headers=headers, timeout=10, allow_redirects=True)
-            time.sleep(random.uniform(1, 2))
-        except Exception as e:
-            logging.warning(f"Не удалось прогреть сессию через requests: {e}")
-
-        headers['Referer'] = 'https://energy-ua.info/'
-        response = session.get(url, headers=headers, timeout=15, allow_redirects=True)
-
-        if response.status_code == 403:
-            logging.error(f"Все попытки неудачны (requests). Статус: {response.status_code}")
-            return None, []
-
-        if response.status_code != 200:
-            logging.error(f"Все попытки неудачны (requests). Статус: {response.status_code}")
-            return None, []
-
-        return parse_schedule_html(response.text, queue, subgroup)
-
-    except Exception as e:
-        logging.error(f"Ошибка парсинга (requests): {e}", exc_info=True)
-        return None, []
-
-
-# --- ОСНОВНОЙ МЕТОД С CLOUDSCRAPER ---
-
-
-def get_schedule_cloudscraper(queue: str, subgroup: str):
-    """Основной метод с использованием cloudscraper для обхода защиты."""
-    try:
-        import cloudscraper
-    except ImportError:
-        logging.warning("cloudscraper не установлен, используем обычный requests")
-        return None, []
-
-    url = f"{BASE_URL}/{queue}-{subgroup}"
-
-    user_agents = [
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    ]
-
-    try:
-        scraper = cloudscraper.create_scraper(
-            browser={
-                'browser': 'chrome',
-                'platform': 'windows',
-                'desktop': True,
-            },
-            delay=10,
+        header = (
+            f"💡 <b>Графік для групи {group_code}</b>\n"
+            f"📅 <i>Дані з alerts.org.ua</i>\n"
+            f"{'─' * 30}\n"
         )
 
-        headers = {
-            'User-Agent': random.choice(user_agents),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-            'Accept-Language': 'uk-UA,uk;q=0.9,en;q=0.8',
-            'DNT': '1',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1',
-            'Pragma': 'no-cache',
-            'Cache-Control': 'no-cache',
-        }
-
-        # Прогреваем сессию
-        try:
-            scraper.get('https://energy-ua.info/', headers=headers, timeout=15)
-            time.sleep(random.uniform(1, 2))
-        except Exception as e:
-            logging.warning(f"Не удалось прогреть сессию через cloudscraper: {e}")
-
-        headers['Referer'] = 'https://www.google.com/'
-        scraper.headers.update(headers)
-
-        response = scraper.get(url, timeout=20)
-
-        if response.status_code == 403:
-            logging.error(f"Cloudscraper вернул 403 для {url}")
-            return None, []
-
-        if response.status_code != 200:
-            logging.error(f"Cloudscraper вернул статус {response.status_code} для {url}")
-            return None, []
-
-        return parse_schedule_html(response.text, queue, subgroup)
+        return header + "\n".join(result_lines), periods
 
     except Exception as e:
-        logging.error(f"Cloudscraper error: {e}", exc_info=True)
-        return None, []
+        logging.error(f"Помилка парсингу alerts.org.ua: {e}", exc_info=True)
+        return "❌ Помилка отримання даних з alerts.org.ua", []
 
 
 # --- ОБЁРТКА С КЭШЕМ ---
 
-
 def get_schedule_cached(queue: str, subgroup: str, force_refresh: bool = False):
     """
-    Возвращает расписание из кэша, либо запрашивает с сайта.
+    Возвращает расписание из кэша, либо запрашивает с alerts.org.ua.
     Кэш живёт CACHE_TTL_MINUTES, поэтому сайт дергается не чаще 1 раза в 10 минут
     для каждой очереди/подгруппы.
     """
@@ -221,9 +137,7 @@ def get_schedule_cached(queue: str, subgroup: str, force_refresh: bool = False):
             return cached["text"], cached["time_periods"]
 
     # Иначе — запрашиваем с сайта
-    schedule_text, time_periods = get_schedule_cloudscraper(queue, subgroup)
-    if schedule_text is None:
-        schedule_text, time_periods = get_schedule(queue, subgroup)
+    schedule_text, time_periods = get_schedule_alerts(queue, subgroup)
 
     if schedule_text is None:
         return None, []
@@ -239,7 +153,6 @@ def get_schedule_cached(queue: str, subgroup: str, force_refresh: bool = False):
 
 # --- ФУНКЦИЯ ОТПРАВКИ УВЕДОМЛЕНИЙ ---
 
-
 async def send_notification(user_id: int, message: str):
     """Отправляет уведомление пользователю."""
     try:
@@ -250,7 +163,6 @@ async def send_notification(user_id: int, message: str):
 
 
 # --- ФОНОВАЯ ЗАДАЧА МОНИТОРИНГА ---
-
 
 async def monitor_schedule():
     """Фоновая задача для проверки расписания и отправки уведомлений."""
@@ -272,6 +184,10 @@ async def monitor_schedule():
 
                 # Проверяем каждый период
                 for period in time_periods:
+                    # интересуют только отключения
+                    if period.get("type") != "outage":
+                        continue
+
                     try:
                         # Парсим время начала отключения
                         start_time = datetime.strptime(period['start'], '%H:%M').replace(
@@ -321,7 +237,6 @@ async def monitor_schedule():
 
 
 # --- ОБРАБОТЧИКИ БОТА ---
-
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -405,7 +320,8 @@ async def process_callback_help(callback_query: types.CallbackQuery):
     help_text = (
         "ℹ️ <b>Допомога</b>\n\n"
         "🔔 <b>Як працюють сповіщення?</b>\n"
-        "Бот автоматично перевіряє графік кожну хвилину та надсилає вам повідомлення:\n"
+        "Бот щохвилини перевіряє час відключень, але дані з сайту оновлює приблизно раз на 10 хвилин.\n"
+        "Ви отримаєте повідомлення:\n"
         "• За 5 хвилин до відключення\n"
         "• За 5 хвилин до увімкнення\n\n"
         "📋 <b>Команди:</b>\n"
@@ -419,10 +335,9 @@ async def process_callback_help(callback_query: types.CallbackQuery):
 
 # --- ЗАПУСК ---
 
-
 async def main():
     print("🤖 Бот запущений та готовий до роботи!")
-    print("💡 Для кращої роботи встановіть: pip install cloudscraper")
+    print("📡 Джерело графіка: alerts.org.ua")
     print("🔔 Фонова задача моніторингу запущена")
 
     # Запускаем фоновую задачу мониторинга
