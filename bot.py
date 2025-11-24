@@ -6,11 +6,20 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta
+from zoneinfo import ZoneInfo
 import re
 
 # --- КОНФИГУРАЦИЯ ---
 API_TOKEN = '8410212460:AAGW8aqzXbatKpXYyLq6Tog7gdNIy4UBwJQ'  # тестовый токен
 ALERTS_URL = "https://alerts.org.ua/poltavska-oblast/"
+
+KYIV_TZ = ZoneInfo("Europe/Kyiv")
+
+
+def now_kyiv() -> datetime:
+    """Текущее время в часовом поясе Киева."""
+    return datetime.now(KYIV_TZ)
+
 
 # Настройка логов
 logging.basicConfig(level=logging.INFO)
@@ -29,6 +38,7 @@ CACHE_TTL_MINUTES = 10  # данные с сайта обновляем раз �
 
 
 # --- ПАРСЕР alerts.org.ua ---
+
 
 def get_schedule_alerts(queue: str, subgroup: str):
     """
@@ -80,7 +90,9 @@ def get_schedule_alerts(queue: str, subgroup: str):
                 end = "23:59"
 
             status_tag = div.find("b")
-            status_class = (status_tag.get("class") or [""])[0] if status_tag else ""
+            status_class_list = status_tag.get("class") if status_tag else []
+            status_class = status_class_list[0] if status_class_list else ""
+
             # статус: on / off / maybe
             if "off" in status_class:
                 icon = "🔴"
@@ -121,6 +133,7 @@ def get_schedule_alerts(queue: str, subgroup: str):
 
 # --- ОБЁРТКА С КЭШЕМ ---
 
+
 def get_schedule_cached(queue: str, subgroup: str, force_refresh: bool = False):
     """
     Возвращает расписание из кэша, либо запрашивает с alerts.org.ua.
@@ -128,7 +141,7 @@ def get_schedule_cached(queue: str, subgroup: str, force_refresh: bool = False):
     для каждой очереди/подгруппы.
     """
     key = f"{queue}-{subgroup}"
-    now = datetime.now()
+    now = now_kyiv()
 
     # Если не форсим и есть свежий кэш — возвращаем его
     if not force_refresh:
@@ -153,6 +166,7 @@ def get_schedule_cached(queue: str, subgroup: str, force_refresh: bool = False):
 
 # --- ФУНКЦИЯ ОТПРАВКИ УВЕДОМЛЕНИЙ ---
 
+
 async def send_notification(user_id: int, message: str):
     """Отправляет уведомление пользователю."""
     try:
@@ -164,14 +178,15 @@ async def send_notification(user_id: int, message: str):
 
 # --- ФОНОВАЯ ЗАДАЧА МОНИТОРИНГА ---
 
+
 async def monitor_schedule():
     """Фоновая задача для проверки расписания и отправки уведомлений."""
     await asyncio.sleep(10)  # Ждем запуска бота
 
     while True:
         try:
-            current_time = datetime.now()
-            logging.info(f"Проверка расписания в {current_time.strftime('%H:%M')}")
+            current_time = now_kyiv()
+            logging.info(f"Проверка расписания в {current_time.strftime('%H:%M')} (Europe/Kyiv)")
 
             for user_id, subscription in user_subscriptions.items():
                 queue = subscription.get('queue', '2')
@@ -189,23 +204,39 @@ async def monitor_schedule():
                         continue
 
                     try:
-                        # Парсим время начала отключения
+                        # Парсим время начала/окончания с таймзоной Киева
                         start_time = datetime.strptime(period['start'], '%H:%M').replace(
                             year=current_time.year,
                             month=current_time.month,
-                            day=current_time.day
+                            day=current_time.day,
+                            tzinfo=KYIV_TZ,
                         )
 
-                        # Парсим время окончания отключения
                         end_time = datetime.strptime(period['end'], '%H:%M').replace(
                             year=current_time.year,
                             month=current_time.month,
-                            day=current_time.day
+                            day=current_time.day,
+                            tzinfo=KYIV_TZ,
                         )
 
                         # Проверяем за 5 минут до отключения
                         time_before_start = start_time - timedelta(minutes=5)
-                        if abs((current_time - time_before_start).total_seconds()) < 60:  # В пределах минуты
+
+                        diff_start = (current_time - time_before_start).total_seconds()
+                        diff_end = (current_time - (end_time - timedelta(minutes=5))).total_seconds()
+
+                        logging.debug(
+                            f"[CHECK] user={user_id} period={period['start']}-{period['end']} "
+                            f"now={current_time.time()} "
+                            f"t-5(off)={time_before_start.time()} diff_start={diff_start:.1f} "
+                            f"t-5(on)={(end_time - timedelta(minutes=5)).time()} diff_end={diff_end:.1f}"
+                        )
+
+                        if abs(diff_start) < 60:  # В пределах минуты
+                            logging.info(
+                                f"[TRIGGER] outage_soon for user={user_id} "
+                                f"start={period['start']} end={period['end']}"
+                            )
                             message = (
                                 f"⚠️ <b>УВАГА!</b>\n\n"
                                 f"🔴 Через 5 хвилин відключать світло!\n"
@@ -217,6 +248,10 @@ async def monitor_schedule():
                         # Проверяем за 5 минут до включения
                         time_before_end = end_time - timedelta(minutes=5)
                         if abs((current_time - time_before_end).total_seconds()) < 60:
+                            logging.info(
+                                f"[TRIGGER] power_on_soon for user={user_id} "
+                                f"start={period['start']} end={period['end']}"
+                            )
                             message = (
                                 f"✅ <b>ДОБРА НОВИНА!</b>\n\n"
                                 f"💡 Через 5 хвилин увімкнуть світло!\n"
@@ -225,7 +260,7 @@ async def monitor_schedule():
                             await send_notification(user_id, message)
 
                     except Exception as e:
-                        logging.error(f"Ошибка обработки периода {period}: {e}")
+                        logging.error(f"Ошибка обработки периода {period}: {e}", exc_info=True)
                         continue
 
             # Проверяем каждую минуту (запросы к сайту ограничивает кэш)
@@ -237,6 +272,7 @@ async def monitor_schedule():
 
 
 # --- ОБРАБОТЧИКИ БОТА ---
+
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
@@ -335,9 +371,11 @@ async def process_callback_help(callback_query: types.CallbackQuery):
 
 # --- ЗАПУСК ---
 
+
 async def main():
     print("🤖 Бот запущений та готовий до роботи!")
     print("📡 Джерело графіка: alerts.org.ua")
+    print("🕒 Часовий пояс: Europe/Kyiv")
     print("🔔 Фонова задача моніторингу запущена")
 
     # Запускаем фоновую задачу мониторинга
