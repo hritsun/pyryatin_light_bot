@@ -2,7 +2,7 @@ import asyncio
 import logging
 import json
 import os
-import random  # Додано для рандомних смайлів
+import random
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 from aiogram import Bot, Dispatcher, types, F
@@ -71,7 +71,6 @@ def format_schedule_message(last_update_dt, text_lines):
     is_old = (now_kyiv() - last_update_dt).total_seconds() > 1800
     
     # Формування тіла графіка
-    # Фільтруємо лінії, щоб залишити тільки ті, що з червоним кружечком або інформативні
     clean_lines = []
     for line in text_lines:
         if "🔴" in line or "год." in line:
@@ -116,7 +115,7 @@ async def monitor_schedule_task():
                             end_dt = datetime.strptime(period['end'], '%H:%M').replace(
                                 year=current_time.year, month=current_time.month, day=current_time.day, tzinfo=KYIV_TZ)
                             
-                            # --- ЛОГІКА ВІДКЛЮЧЕННЯ (СУМНИЙ СМАЙЛ) ---
+                            # --- ЛОГІКА ВІДКЛЮЧЕННЯ ---
                             diff_start = (start_dt - current_time).total_seconds()
                             if 240 < diff_start <= 300: # 4-5 хвилин до
                                 await bot.send_message(
@@ -129,9 +128,9 @@ async def monitor_schedule_task():
                                     parse_mode="HTML"
                                 )
 
-                            # --- ЛОГІКА ВКЛЮЧЕННЯ (ВЕСЕЛИЙ СМАЙЛ) ---
+                            # --- ЛОГІКА ВКЛЮЧЕННЯ ---
                             diff_end = (end_dt - current_time).total_seconds()
-                            if 240 < diff_end <= 300: # 4-5 хвилин до кінця відключення
+                            if 240 < diff_end <= 300: # 4-5 хвилин до кінця
                                 await bot.send_message(
                                     user_id, 
                                     f"{get_random_happy()} <b>СКОРО СВІТЛО!</b>\n\n"
@@ -151,10 +150,18 @@ async def monitor_schedule_task():
             logging.error(f"Помилка моніторингу: {e}")
             await asyncio.sleep(60)
 
-# --- ОБРОБНИКИ (HANDLERS) ---
+# --- КЛАВІАТУРИ (РІЗНІ ДЛЯ РІЗНИХ СИТУАЦІЙ) ---
 
-def get_main_keyboard():
-    """Повертає клавіатуру, яка завжди під графіком."""
+def get_start_keyboard():
+    """Клавіатура для /start: Тільки перевірка та підписка."""
+    kb = [
+        [InlineKeyboardButton(text="⚡ Перевірити графік", callback_data="check_2_1")],
+        [InlineKeyboardButton(text="🔔 Підписатись на сповіщення", callback_data="subscribe")]
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+def get_schedule_keyboard():
+    """Клавіатура під графіком: Оновити + Налаштування підписки."""
     kb = [
         [InlineKeyboardButton(text="🔄 Оновити", callback_data="check_2_1")],
         [
@@ -164,56 +171,62 @@ def get_main_keyboard():
     ]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
+def get_unsub_button():
+    """Кнопка 'Відписатись' для повідомлення про успішну підписку."""
+    kb = [[InlineKeyboardButton(text="🔕 Відписатись", callback_data="unsubscribe")]]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+def get_sub_button():
+    """Кнопка 'Підписатись' для повідомлення про скасування підписки."""
+    kb = [[InlineKeyboardButton(text="🔔 Підписатись", callback_data="subscribe")]]
+    return InlineKeyboardMarkup(inline_keyboard=kb)
+
+
+# --- ОБРОБНИКИ (HANDLERS) ---
+
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
         "👋 Привіт! Я бот моніторингу відключень світла (2 черга, 1 підгрупа).\n\n" 
         "Ти можеш перевірити графік або підключити сповіщення за 5 хвилин до відключення або включення світла ✅", 
-        reply_markup=get_main_keyboard()
+        reply_markup=get_start_keyboard() # ТУТ ТЕПЕР ПРАВИЛЬНА КЛАВІАТУРА
     )
 
-# Додаємо команду /check як просив
 @dp.message(Command("check"))
 async def cmd_check(message: types.Message):
-    # Викликаємо ту саму логіку, що і кнопка
     last_update, lines, _ = get_schedule_data()
     base_text = format_schedule_message(last_update, lines)
     
     current_time_str = now_kyiv().strftime('%H:%M:%S')
     final_text = f"{base_text}\n\n⏱ Запит оновлено: {current_time_str}"
     
-    await message.answer(final_text, parse_mode="HTML", reply_markup=get_main_keyboard())
+    await message.answer(final_text, parse_mode="HTML", reply_markup=get_schedule_keyboard())
 
-# Додаємо команду /unsub як просив
 @dp.message(Command("unsub"))
 async def cmd_unsub(message: types.Message):
     user_id = message.from_user.id
     if user_id in user_subscriptions:
         del user_subscriptions[user_id]
-        await message.answer("🔕 Підписку скасовано.")
+        await message.answer("🔕 Підписку скасовано.", reply_markup=get_sub_button())
     else:
-        await message.answer("Ви не були підписані.")
+        await message.answer("Ви не були підписані.", reply_markup=get_sub_button())
 
 @dp.callback_query(F.data == "check_2_1")
 async def cb_check(callback: types.CallbackQuery):
     last_update, lines, _ = get_schedule_data()
-    
-    # Формуємо базовий текст графіка
     base_text = format_schedule_message(last_update, lines)
     
-    # Додаємо час запиту (щоб повідомлення змінювалось і не було помилки Telegram)
     current_time_str = now_kyiv().strftime('%H:%M:%S')
     final_text = f"{base_text}\n\n⏱ Запит оновлено: {current_time_str}"
     
-    # Редагуємо повідомлення, залишаючи кнопки на місці
     try:
         await callback.message.edit_text(
             final_text, 
             parse_mode="HTML", 
-            reply_markup=get_main_keyboard()
+            reply_markup=get_schedule_keyboard() # ТУТ КЛАВІАТУРА З КНОПКОЮ ОНОВИТИ
         )
     except Exception:
-        pass # Ігноруємо помилки, якщо текст не змінився (хоча час це фіксить)
+        pass
         
     await callback.answer()
 
@@ -225,8 +238,11 @@ async def cb_sub(callback: types.CallbackQuery):
         return
         
     user_subscriptions[user_id] = True
-    # Відсилаємо окреме повідомлення, як просив
-    await callback.message.answer("✅ Ви підписалися на сповіщення (за 5 хв до відключення та включення світла)")
+    # Відсилаємо повідомлення з кнопкою "Відписатись"
+    await callback.message.answer(
+        "✅ Ви підписалися на сповіщення (за 5 хв до відключення та включення світла)",
+        reply_markup=get_unsub_button()
+    )
     await callback.answer()
 
 @dp.callback_query(F.data == "unsubscribe")
@@ -234,8 +250,11 @@ async def cb_unsub(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     if user_id in user_subscriptions:
         del user_subscriptions[user_id]
-        # Відсилаємо окреме повідомлення
-        await callback.message.answer("🔕 Підписку скасовано.")
+        # Відсилаємо повідомлення з кнопкою "Підписатись"
+        await callback.message.answer(
+            "🔕 Підписку скасовано.",
+            reply_markup=get_sub_button()
+        )
     else:
         await callback.answer("Ви не підписані!", show_alert=True)
         return
