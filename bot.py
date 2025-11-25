@@ -78,13 +78,14 @@ def get_schedule(queue: str, subgroup: str):
     try:
         logging.info(f"Запрос к {url} через Web Unlocker")
         
-        # Используем Web Unlocker прокси для обхода Cloudflare
+        # Запрос с увеличенным таймаутом для решения Cloudflare challenge
         response = requests.get(
             url, 
             headers=headers, 
             proxies=WEB_UNLOCKER_PROXY,
-            timeout=60,
-            verify=False  # Отключаем проверку SSL для прокси
+            timeout=120,  # Увеличили до 2 минут для решения challenge
+            verify=False,  # Отключаем проверку SSL для прокси
+            allow_redirects=True
         )
         
         if response.status_code != 200:
@@ -224,12 +225,12 @@ async def monitor_schedule():
                         logging.error(f"Ошибка обработки периода {period}: {e}")
                         continue
             
-            # Проверяем каждую минуту
-            await asyncio.sleep(60)
+            # Проверяем каждые 10 минут (кэш тоже 10 минут)
+            await asyncio.sleep(600)
             
         except Exception as e:
             logging.error(f"Ошибка в monitor_schedule: {e}", exc_info=True)
-            await asyncio.sleep(60)
+            await asyncio.sleep(600)  # При ошибке тоже ждем 10 минут
 
 # --- ОБРАБОТЧИКИ БОТА ---
 
