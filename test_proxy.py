@@ -19,7 +19,7 @@ def test_unlocker():
     print("=" * 60)
     
     try:
-        response = requests.get(url, proxies=WEB_UNLOCKER_PROXY, timeout=60)
+        response = requests.get(url, proxies=WEB_UNLOCKER_PROXY, timeout=60, verify=False)
         
         print(f"Status: {response.status_code}")
         
