@@ -333,7 +333,7 @@ def get_sub_button():
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-# --- ОБРАБОТЧИКИ ПОЛЬЗОВАТЕЛЕЙ ---
+# --- ОБЫЧНЫЕ КОМАНДЫ ---
 
 
 @dp.message(Command("start"))
@@ -358,6 +358,11 @@ async def cmd_check(message: types.Message):
 async def cmd_unsub(message: types.Message):
     await save_user(message)
     user_id = message.from_user.id
+
+    if not await is_subscribed(user_id):
+        await message.answer("Ви не були підписані.", reply_markup=get_sub_button())
+        return
+
     await remove_subscription(user_id)
     await message.answer("🔕 Підписку скасовано.", reply_markup=get_sub_button())
 
@@ -378,6 +383,12 @@ async def cb_check(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "subscribe")
 async def cb_sub(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+
+    # Уже подписан — просто алерт, без спама
+    if await is_subscribed(user_id):
+        await callback.answer("Ви вже підписані на сповіщення ✅", show_alert=True)
+        return
+
     await add_subscription(user_id)
 
     await callback.message.answer(
@@ -390,12 +401,39 @@ async def cb_sub(callback: types.CallbackQuery):
 @dp.callback_query(F.data == "unsubscribe")
 async def cb_unsub(callback: types.CallbackQuery):
     user_id = callback.from_user.id
+
+    if not await is_subscribed(user_id):
+        await callback.answer("Ви не підписані.", show_alert=True)
+        return
+
     await remove_subscription(user_id)
     await callback.message.answer(
         "🔕 Підписку скасовано.",
         reply_markup=get_sub_button(),
     )
     await callback.answer()
+
+
+# --- АДМИН /admin: чек-лист команд ---
+
+
+@dp.message(Command("admin"))
+async def cmd_admin_help(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    text = (
+        "🛠 <b>Адмін-панель</b>\n\n"
+        "<b>/admin</b> – показати цей список команд\n"
+        "<b>/adminmsg ТЕКСТ</b> – створити чернетку розсилки з попереднім переглядом\n"
+        "<b>/admincancel</b> – скасувати поточну чернетку розсилки\n"
+        "<b>/adminstats</b> – статистика користувачів та підписників\n\n"
+        "Після <b>/adminmsg</b> бот покаже кнопки:\n"
+        "• ✅ <i>Надіслати всім</i> – запуск розсилки\n"
+        "• ❌ <i>Скасувати розсилку</i> – видалити чернетку без відправки\n"
+    )
+
+    await message.answer(text)
 
 
 # --- АДМИН: РАССЫЛКА С ПРЕВЬЮ И ОТМЕНОЙ ---
@@ -502,7 +540,6 @@ async def cb_admin_confirm(callback: types.CallbackQuery):
         except Exception as e:
             logging.error(f"Не вдалося надіслати {user_id}: {e}")
 
-    # Итоговая статистика тебе в личку
     await bot.send_message(
         ADMIN_ID,
         f"✅ Розсилка завершена.\n"
