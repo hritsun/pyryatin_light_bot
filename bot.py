@@ -9,29 +9,29 @@ from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 
-# --- КОНФІГУРАЦІЯ ---
+# --- КОНФИГУРАЦИЯ ---
 API_TOKEN = os.getenv('API_TOKEN', '8410212460:AAGW8aqzXbatKpXYyLq6Tog7gdNIy4UBwJQ') 
 DATA_FILE = 'schedule_data.json'
 
-# Таймзона Києва
+# Таймзона Киева
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-# Списки смайлів
+# Списки смайлов
 SAD_EMOJIS = ["😢", "😭", "😞", "😫", "😕", "😿", "💔", "😥", "☹️", "о_О", "🫤", "😣", "😔", "😖", "😩", "🥺", "😦", "😧", "😨", "😰"]
 HAPPY_EMOJIS = ["😍", "🥰", "🥳", "😏", "😎", "😇", "🙂", "🎉", "😍", "🤩", "😁", "😀", "😃", "😄", "😆", "😉", "😊", "😋", "😌", "🙌"]
 
-# Налаштування логів
+# Настройка логов
 logging.basicConfig(level=logging.INFO)
 
-# Ініціалізація бота
+# Инициализация бота
 bot = Bot(token=API_TOKEN)
 dp = Dispatcher()
 
-# Сховище підписок користувачів {user_id: True}
+# Хранилище подписок пользователей {user_id: True}
 user_subscriptions = {} 
 
 def now_kyiv():
-    """Повертає поточний час у таймзоні Києва"""
+    """Возвращает текущее время в таймзоне Киева"""
     return datetime.now(KYIV_TZ)
 
 def get_random_sad():
@@ -40,9 +40,9 @@ def get_random_sad():
 def get_random_happy():
     return random.choice(HAPPY_EMOJIS)
 
-# --- ЧИТАННЯ ДАНИХ З ФАЙЛУ ---
+# --- ЧТЕНИЕ ДАННЫХ ИЗ ФАЙЛА ---
 def get_schedule_data():
-    """Читає 'сирі' дані з JSON файлу для подальшого форматування."""
+    """Читает 'сырые' данные из JSON файла."""
     if not os.path.exists(DATA_FILE):
         return None, None, None
 
@@ -59,18 +59,18 @@ def get_schedule_data():
         return last_update_dt, text_lines, periods
 
     except Exception as e:
-        logging.error(f"Помилка читання файлу: {e}")
+        logging.error(f"Ошибка чтения файла: {e}")
         return None, None, None
 
 def format_schedule_message(last_update_dt, text_lines):
-    """Формує гарне повідомлення за твоїм шаблоном."""
+    """Формирует сообщение с графиком."""
     if not last_update_dt:
         return "⚠️ Дані ще не зібрані. Спробуйте пізніше."
 
-    # Перевірка на застарілість (30 хв)
+    # Проверка на устаревание (30 мин)
     is_old = (now_kyiv() - last_update_dt).total_seconds() > 1800
     
-    # Формування тіла графіка
+    # Формирование тела графика
     clean_lines = []
     for line in text_lines:
         if "🔴" in line or "год." in line:
@@ -81,7 +81,7 @@ def format_schedule_message(last_update_dt, text_lines):
     else:
         schedule_body = "\n".join(clean_lines)
 
-    # Основний шаблон
+    # Основной шаблон
     message = (
         f"📅 <b>Графік для групи 2.1</b>\n\n"
         f"💡 <i>Оновлено: {last_update_dt.strftime('%H:%M')}</i>\n\n"
@@ -94,10 +94,10 @@ def format_schedule_message(last_update_dt, text_lines):
 
     return message
 
-# --- ФОНОВА ЗАДАЧА СПОВІЩЕНЬ ---
+# --- ФОНОВАЯ ЗАДАЧА УВЕДОМЛЕНИЙ ---
 async def monitor_schedule_task():
-    """Перевіряє файл та надсилає сповіщення."""
-    logging.info("🔔 Моніторинг запущено")
+    """Проверяет файл и отправляет уведомления."""
+    logging.info("🔔 Мониторинг запущен")
     await asyncio.sleep(5) 
     
     while True:
@@ -107,7 +107,9 @@ async def monitor_schedule_task():
             
             if time_periods:
                 for user_id in list(user_subscriptions.keys()): 
-                    for period in time_periods:
+                    # Используем enumerate, чтобы знать индекс текущего периода
+                    # Это нужно, чтобы посмотреть на следующий период (для времени ВКЛЮЧЕНИЯ)
+                    for i, period in enumerate(time_periods):
                         try:
                             start_dt = datetime.strptime(period['start'], '%H:%M').replace(
                                 year=current_time.year, month=current_time.month, day=current_time.day, tzinfo=KYIV_TZ)
@@ -115,45 +117,54 @@ async def monitor_schedule_task():
                             end_dt = datetime.strptime(period['end'], '%H:%M').replace(
                                 year=current_time.year, month=current_time.month, day=current_time.day, tzinfo=KYIV_TZ)
                             
-                            # --- ЛОГІКА ВІДКЛЮЧЕННЯ ---
+                            # --- 1. ЛОГИКА ОТКЛЮЧЕНИЯ (СУМНИЙ СМАЙЛ) ---
+                            # За 5 минут до start_dt
                             diff_start = (start_dt - current_time).total_seconds()
-                            if 240 < diff_start <= 300: # 4-5 хвилин до
+                            
+                            if 240 < diff_start <= 300: # 4-5 минут до
                                 await bot.send_message(
                                     user_id, 
-                                    f"{get_random_sad()} <b>УВАГА!</b>\n\n"
-                                    f"🔴 Через 5 хвилин відключать світло!\n"
-                                    f"⏰ Час: <b>{period['start']} - {period['end']}</b>\n\n"
+                                    f"{get_random_sad()} Через 5 хвилин відключать світло!\n\n"
+                                    f"🔴 Орієнтовно з {period['start']} до {period['end']}\n\n"
                                     f"🔕 /unsub - відписатись\n"
                                     f"👀 /check - перевірити графік",
                                     parse_mode="HTML"
                                 )
 
-                            # --- ЛОГІКА ВКЛЮЧЕННЯ ---
+                            # --- 2. ЛОГИКА ВКЛЮЧЕНИЯ (ВЕСЕЛИЙ СМАЙЛ) ---
+                            # За 5 минут до end_dt
                             diff_end = (end_dt - current_time).total_seconds()
-                            if 240 < diff_end <= 300: # 4-5 хвилин до кінця
+                            
+                            if 240 < diff_end <= 300: # 4-5 минут до конца
+                                # Логика: нам нужно узнать, когда СЛЕДУЮЩЕЕ отключение
+                                next_off_time = "кінця доби" # Значение по умолчанию
+                                
+                                # Проверяем, есть ли следующий период в списке
+                                if i + 1 < len(time_periods):
+                                    next_period = time_periods[i+1]
+                                    next_off_time = next_period['start']
+                                
                                 await bot.send_message(
                                     user_id, 
-                                    f"{get_random_happy()} <b>СКОРО СВІТЛО!</b>\n\n"
-                                    f"💡 Через 5 хвилин увімкнуть!\n"
-                                    f"⏰ Орієнтовно о <b>{period['end']}</b>\n\n"
+                                    f"{get_random_happy()} Через 5 хвилин увімкнуть світло!\n\n"
+                                    f"🟢 Орієнтовно з {period['end']} до {next_off_time}\n\n"
                                     f"🔕 /unsub - відписатись\n"
                                     f"👀 /check - перевірити графік",
                                     parse_mode="HTML"
                                 )
 
                         except Exception as e:
-                            logging.error(f"Помилка періоду: {e}")
+                            logging.error(f"Ошибка периода: {e}")
 
             await asyncio.sleep(60)
             
         except Exception as e:
-            logging.error(f"Помилка моніторингу: {e}")
+            logging.error(f"Ошибка мониторинга: {e}")
             await asyncio.sleep(60)
 
-# --- КЛАВІАТУРИ (РІЗНІ ДЛЯ РІЗНИХ СИТУАЦІЙ) ---
+# --- КЛАВИАТУРЫ ---
 
 def get_start_keyboard():
-    """Клавіатура для /start: Тільки перевірка та підписка."""
     kb = [
         [InlineKeyboardButton(text="⚡ Перевірити графік", callback_data="check_2_1")],
         [InlineKeyboardButton(text="🔔 Підписатись на сповіщення", callback_data="subscribe")]
@@ -161,9 +172,8 @@ def get_start_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_schedule_keyboard():
-    """Клавіатура під графіком: Оновити + Налаштування підписки."""
     kb = [
-        [InlineKeyboardButton(text="🔄 Оновити", callback_data="check_2_1")],
+        [InlineKeyboardButton(text="🔄 Оновити графік", callback_data="check_2_1")],
         [
             InlineKeyboardButton(text="🔔 Підписатись", callback_data="subscribe"),
             InlineKeyboardButton(text="🔕 Відписатись", callback_data="unsubscribe")
@@ -172,24 +182,22 @@ def get_schedule_keyboard():
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_unsub_button():
-    """Кнопка 'Відписатись' для повідомлення про успішну підписку."""
     kb = [[InlineKeyboardButton(text="🔕 Відписатись", callback_data="unsubscribe")]]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 def get_sub_button():
-    """Кнопка 'Підписатись' для повідомлення про скасування підписки."""
     kb = [[InlineKeyboardButton(text="🔔 Підписатись", callback_data="subscribe")]]
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-# --- ОБРОБНИКИ (HANDLERS) ---
+# --- ОБРАБОТЧИКИ (HANDLERS) ---
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
     await message.answer(
         "👋 Привіт! Я бот моніторингу відключень світла (2 черга, 1 підгрупа).\n\n" 
         "Ти можеш перевірити графік або підключити сповіщення за 5 хвилин до відключення або включення світла ✅", 
-        reply_markup=get_start_keyboard() # ТУТ ТЕПЕР ПРАВИЛЬНА КЛАВІАТУРА
+        reply_markup=get_start_keyboard()
     )
 
 @dp.message(Command("check"))
@@ -223,7 +231,7 @@ async def cb_check(callback: types.CallbackQuery):
         await callback.message.edit_text(
             final_text, 
             parse_mode="HTML", 
-            reply_markup=get_schedule_keyboard() # ТУТ КЛАВІАТУРА З КНОПКОЮ ОНОВИТИ
+            reply_markup=get_schedule_keyboard()
         )
     except Exception:
         pass
@@ -238,7 +246,6 @@ async def cb_sub(callback: types.CallbackQuery):
         return
         
     user_subscriptions[user_id] = True
-    # Відсилаємо повідомлення з кнопкою "Відписатись"
     await callback.message.answer(
         "✅ Ви підписалися на сповіщення (за 5 хв до відключення та включення світла)",
         reply_markup=get_unsub_button()
@@ -250,7 +257,6 @@ async def cb_unsub(callback: types.CallbackQuery):
     user_id = callback.from_user.id
     if user_id in user_subscriptions:
         del user_subscriptions[user_id]
-        # Відсилаємо повідомлення з кнопкою "Підписатись"
         await callback.message.answer(
             "🔕 Підписку скасовано.",
             reply_markup=get_sub_button()
@@ -262,7 +268,7 @@ async def cb_unsub(callback: types.CallbackQuery):
 
 # --- ЗАПУСК ---
 async def main():
-    print("🤖 Бот запускається...")
+    print("🤖 Бот запускается...")
     asyncio.create_task(monitor_schedule_task())
     
     await bot.delete_webhook(drop_pending_updates=True)
