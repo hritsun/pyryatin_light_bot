@@ -165,9 +165,13 @@ async def get_all_subscribers() -> list[int]:
 
 
 def get_schedule_data():
-    """Читает 'сырые' данные из JSON файла."""
+    """
+    Читает данные з JSON:
+    - сьогодні (today_text_lines / today_periods)
+    - завтра (tomorrow_text_lines / tomorrow_periods, може бути пусто)
+    """
     if not os.path.exists(DATA_FILE):
-        return None, None, None
+        return None, [], [], [], []
 
     try:
         with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -176,50 +180,68 @@ def get_schedule_data():
         last_update_ts = data.get("timestamp") or data.get("updated_at", 0)
         last_update_dt = datetime.fromtimestamp(last_update_ts, KYIV_TZ)
 
-        text_lines = data.get("text_lines", [])
-        periods = data.get("periods", [])
+        # сьогодні: нові ключі або старі (для сумісності)
+        today_lines = data.get("today_text_lines") or data.get("text_lines", [])
+        today_periods = data.get("today_periods") or data.get("periods", [])
 
-        return last_update_dt, text_lines, periods
+        # завтра: можуть бути відсутні
+        tomorrow_lines = data.get("tomorrow_text_lines", []) or []
+        tomorrow_periods = data.get("tomorrow_periods", []) or []
+
+        return last_update_dt, today_lines, today_periods, tomorrow_lines, tomorrow_periods
 
     except Exception as e:
         logging.error(f"Ошибка чтения файла: {e}")
-        return None, None, None
+        return None, [], [], [], []
 
 
-def format_schedule_message(last_update_dt, text_lines):
-    """Формирует сообщение с графиком."""
+def format_schedule_message(last_update_dt, today_lines, tomorrow_lines):
+    """Формує повідомлення з графіком (сьогодні + завтра)."""
     if not last_update_dt:
         return "⚠️ Дані ще не зібрані. Спробуйте пізніше."
 
     is_old = (now_kyiv() - last_update_dt).total_seconds() > 1800
 
-    clean_lines = []
-    for line in text_lines:
-        if "🔴" in line or "год." in line:
-            clean_lines.append(line)
+    def clean_lines(lines):
+        cleaned = []
+        for line in lines:
+            if "🔴" in line or "год." in line:
+                cleaned.append(line)
+        return cleaned
 
-    if not clean_lines:
-        schedule_body = "✅ Відключень не знайдено."
+    today_clean = clean_lines(today_lines)
+    tomorrow_clean = clean_lines(tomorrow_lines)
+
+    parts: list[str] = []
+    parts.append("📅 <b>Графік для групи 2.1</b>")
+    parts.append("")
+    parts.append(f"💡 <i>Оновлено: {last_update_dt.strftime('%H:%M')}</i>")
+    parts.append("")
+
+    # Сьогодні
+    parts.append("<b>Графік на сьогодні:</b>")
+    if not today_clean:
+        parts.append("✅ Відключень не знайдено.")
     else:
-        schedule_body = "\n".join(clean_lines)
+        parts.extend(today_clean)
 
-    message = (
-        f"📅 <b>Графік для групи 2.1</b>\n\n"
-        f"💡 <i>Оновлено: {last_update_dt.strftime('%H:%M')}</i>\n\n"
-        f"<b>Графік відключень:</b>\n"
-        f"{schedule_body}"
-    )
+    # Завтра (якщо є)
+    if tomorrow_clean:
+        parts.append("")
+        parts.append("<b>Графік на завтра:</b>")
+        parts.extend(tomorrow_clean)
 
     if is_old:
-        message += "\n\n⚠️ <i>Дані застарілі, парсер оновлює джерело...</i>"
+        parts.append("")
+        parts.append("⚠️ <i>Дані застарілі, парсер оновлює джерело...</i>")
 
-    return message
+    return "\n".join(parts)
 
 
 def build_schedule_answer():
-    """Готовый текст для /check и для кнопки обновления."""
-    last_update, lines, _ = get_schedule_data()
-    base_text = format_schedule_message(last_update, lines)
+    """Готовый текст для /check и кнопки обновления."""
+    last_update, today_lines, _, tomorrow_lines, _ = get_schedule_data()
+    base_text = format_schedule_message(last_update, today_lines, tomorrow_lines)
     current_time_str = now_kyiv().strftime("%H:%M:%S")
     final_text = f"{base_text}\n\n⏱ Запит оновлено: {current_time_str}"
     return final_text
@@ -229,14 +251,14 @@ def build_schedule_answer():
 
 
 async def monitor_schedule_task():
-    """Проверяет файл и отправляет уведомления подписчикам."""
+    """Проверяет файл и отправляет уведомления подписчикам (по сьогодні)."""
     logging.info("🔔 Мониторинг запущен")
     await asyncio.sleep(5)
 
     while True:
         try:
             current_time = now_kyiv()
-            _, _, time_periods = get_schedule_data()
+            _, _, time_periods, _, _ = get_schedule_data()
 
             if time_periods:
                 subscribers = await get_all_subscribers()
@@ -414,7 +436,7 @@ async def cb_unsub(callback: types.CallbackQuery):
     await callback.answer()
 
 
-# --- АДМИН /admin: чек-лист команд ---
+# --- АДМІН /admin: чек-лист ---
 
 
 @dp.message(Command("admin"))
@@ -436,7 +458,7 @@ async def cmd_admin_help(message: types.Message):
     await message.answer(text)
 
 
-# --- АДМИН: РАССЫЛКА С ПРЕВЬЮ И ОТМЕНОЙ ---
+# --- АДМІН: РОЗСИЛКА ---
 
 
 @dp.message(Command("adminmsg"))
@@ -482,9 +504,7 @@ async def cmd_adminmsg(message: types.Message):
 
 @dp.message(Command("admincancel"))
 async def cmd_admincancel(message: types.Message):
-    """
-    /admincancel — отмена текущей ожидающей рассылки без нажатия кнопки.
-    """
+    """ /admincancel — отмена текущей ожидающей рассылки без нажатия кнопки. """
     if message.from_user.id != ADMIN_ID:
         return
 
@@ -550,7 +570,7 @@ async def cb_admin_confirm(callback: types.CallbackQuery):
     await callback.answer("Розсилку завершено ✅")
 
 
-# --- АДМИН: СТАТИСТИКА ---
+# --- АДМІН: СТАТИСТИКА ---
 
 
 @dp.message(Command("adminstats"))
