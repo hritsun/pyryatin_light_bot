@@ -3,6 +3,10 @@ import logging
 import json
 import os
 import random
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -10,15 +14,16 @@ import asyncpg
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.client.default import DefaultBotProperties  # <--- новый импорт
 
 # --- КОНФИГУРАЦИЯ ---
 
 # Токен бота берём из переменной окружения
-API_TOKEN = os.getenv('API_TOKEN')
+API_TOKEN = os.getenv("API_TOKEN")
 if not API_TOKEN:
     raise RuntimeError("API_TOKEN env var is not set")
 
-DATA_FILE = 'schedule_data.json'
+DATA_FILE = "schedule_data.json"
 
 # Адрес базы данных PostgreSQL
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -32,14 +37,59 @@ ADMIN_ID = int(os.getenv("ADMIN_ID", "7034386844"))
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
 # Списки смайлов
-SAD_EMOJIS = ["😢", "😭", "😞", "😫", "😕", "😿", "💔", "😥", "☹️", "о_О", "🫤", "😣", "😔", "😖", "😩", "🥺", "😦", "😧", "😨", "😰"]
-HAPPY_EMOJIS = ["😍", "🥰", "🥳", "😏", "😎", "😇", "🙂", "🎉", "😍", "🤩", "😁", "😀", "😃", "😄", "😆", "😉", "😊", "😋", "😌", "🙌"]
+SAD_EMOJIS = [
+    "😢",
+    "😭",
+    "😞",
+    "😫",
+    "😕",
+    "😿",
+    "💔",
+    "😥",
+    "☹️",
+    "о_О",
+    "🫤",
+    "😣",
+    "😔",
+    "😖",
+    "😩",
+    "🥺",
+    "😦",
+    "😧",
+    "😨",
+    "😰",
+]
+HAPPY_EMOJIS = [
+    "😍",
+    "🥰",
+    "🥳",
+    "😏",
+    "😎",
+    "😇",
+    "🙂",
+    "🎉",
+    "😍",
+    "🤩",
+    "😁",
+    "😀",
+    "😃",
+    "😄",
+    "😆",
+    "😉",
+    "😊",
+    "😋",
+    "😌",
+    "🙌",
+]
 
 # Настройка логов
 logging.basicConfig(level=logging.INFO)
 
-# Инициализация бота
-bot = Bot(token=API_TOKEN, parse_mode="HTML")
+# Инициализация бота (исправлено под aiogram 3.7+)
+bot = Bot(
+    token=API_TOKEN,
+    default=DefaultBotProperties(parse_mode="HTML"),
+)
 dp = Dispatcher()
 
 # Пул соединений с БД
