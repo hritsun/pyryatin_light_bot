@@ -14,78 +14,35 @@ import asyncpg
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
-from aiogram.client.default import DefaultBotProperties  # <--- новый импорт
+from aiogram.client.default import DefaultBotProperties
 
 # --- КОНФИГУРАЦИЯ ---
 
-# Токен бота берём из переменной окружения
 API_TOKEN = os.getenv("API_TOKEN")
 if not API_TOKEN:
     raise RuntimeError("API_TOKEN env var is not set")
 
 DATA_FILE = "schedule_data.json"
 
-# Адрес базы данных PostgreSQL
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
     raise RuntimeError("DATABASE_URL env var is not set")
 
-# ID админа (твой); можно задать и через ENV, но дефолтом ставим твой
 ADMIN_ID = int(os.getenv("ADMIN_ID", "7034386844"))
 
-# Таймзона Киева
 KYIV_TZ = ZoneInfo("Europe/Kyiv")
 
-# Списки смайлов
 SAD_EMOJIS = [
-    "😢",
-    "😭",
-    "😞",
-    "😫",
-    "😕",
-    "😿",
-    "💔",
-    "😥",
-    "☹️",
-    "о_О",
-    "🫤",
-    "😣",
-    "😔",
-    "😖",
-    "😩",
-    "🥺",
-    "😦",
-    "😧",
-    "😨",
-    "😰",
+    "😢", "😭", "😞", "😫", "😕", "😿", "💔", "😥", "☹️", "о_О",
+    "🫤", "😣", "😔", "😖", "😩", "🥺", "😦", "😧", "😨", "😰",
 ]
 HAPPY_EMOJIS = [
-    "😍",
-    "🥰",
-    "🥳",
-    "😏",
-    "😎",
-    "😇",
-    "🙂",
-    "🎉",
-    "😍",
-    "🤩",
-    "😁",
-    "😀",
-    "😃",
-    "😄",
-    "😆",
-    "😉",
-    "😊",
-    "😋",
-    "😌",
-    "🙌",
+    "😍", "🥰", "🥳", "😏", "😎", "😇", "🙂", "🎉", "😍", "🤩",
+    "😁", "😀", "😃", "😄", "😆", "😉", "😊", "😋", "😌", "🙌",
 ]
 
-# Настройка логов
 logging.basicConfig(level=logging.INFO)
 
-# Инициализация бота (исправлено под aiogram 3.7+)
 bot = Bot(
     token=API_TOKEN,
     default=DefaultBotProperties(parse_mode="HTML"),
@@ -95,9 +52,11 @@ dp = Dispatcher()
 # Пул соединений с БД
 db_pool: asyncpg.Pool | None = None
 
+# Ожидающая подтверждения админ-рассылка: {admin_id: text}
+pending_admin_messages: dict[int, str] = {}
+
 
 def now_kyiv():
-    """Возвращает текущее время в таймзоне Киева"""
     return datetime.now(KYIV_TZ)
 
 
@@ -117,7 +76,6 @@ async def init_db():
     global db_pool
     db_pool = await asyncpg.create_pool(DATABASE_URL)
     async with db_pool.acquire() as conn:
-        # Список всех юзеров бота
         await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -130,7 +88,6 @@ async def init_db():
             );
             """
         )
-        # Подписчики уведомлений
         await conn.execute(
             """
             CREATE TABLE IF NOT EXISTS subscribers (
@@ -166,7 +123,6 @@ async def save_user(message: types.Message):
 
 
 async def add_subscription(user_id: int):
-    """Добавить юзера в список подписчиков."""
     if db_pool is None:
         return
     async with db_pool.acquire() as conn:
@@ -181,7 +137,6 @@ async def add_subscription(user_id: int):
 
 
 async def remove_subscription(user_id: int):
-    """Удалить юзера из списка подписчиков."""
     if db_pool is None:
         return
     async with db_pool.acquire() as conn:
@@ -189,7 +144,6 @@ async def remove_subscription(user_id: int):
 
 
 async def is_subscribed(user_id: int) -> bool:
-    """Проверить, подписан ли юзер."""
     if db_pool is None:
         return False
     async with db_pool.acquire() as conn:
@@ -200,7 +154,6 @@ async def is_subscribed(user_id: int) -> bool:
 
 
 async def get_all_subscribers() -> list[int]:
-    """Вернуть список всех user_id подписчиков."""
     if db_pool is None:
         return []
     async with db_pool.acquire() as conn:
@@ -238,10 +191,8 @@ def format_schedule_message(last_update_dt, text_lines):
     if not last_update_dt:
         return "⚠️ Дані ще не зібрані. Спробуйте пізніше."
 
-    # Проверка на устаревание (30 мин)
     is_old = (now_kyiv() - last_update_dt).total_seconds() > 1800
 
-    # Формирование тела графика
     clean_lines = []
     for line in text_lines:
         if "🔴" in line or "год." in line:
@@ -252,7 +203,6 @@ def format_schedule_message(last_update_dt, text_lines):
     else:
         schedule_body = "\n".join(clean_lines)
 
-    # Основной шаблон
     message = (
         f"📅 <b>Графік для групи 2.1</b>\n\n"
         f"💡 <i>Оновлено: {last_update_dt.strftime('%H:%M')}</i>\n\n"
@@ -292,7 +242,6 @@ async def monitor_schedule_task():
                 subscribers = await get_all_subscribers()
 
                 for user_id in subscribers:
-                    # перебираем все периоды для каждого подписчика
                     for i, period in enumerate(time_periods):
                         try:
                             start_dt = datetime.strptime(
@@ -311,10 +260,9 @@ async def monitor_schedule_task():
                                 tzinfo=KYIV_TZ,
                             )
 
-                            # --- 1. ЛОГИКА ОТКЛЮЧЕНИЯ (СУМНИЙ СМАЙЛ) ---
+                            # 1. За 5 минут до отключения
                             diff_start = (start_dt - current_time).total_seconds()
-
-                            if 240 < diff_start <= 300:  # 4-5 минут до
+                            if 240 < diff_start <= 300:
                                 await bot.send_message(
                                     user_id,
                                     f"{get_random_sad()} Через 5 хвилин відключать світло!\n\n"
@@ -323,12 +271,10 @@ async def monitor_schedule_task():
                                     f"👀 /check - перевірити графік",
                                 )
 
-                            # --- 2. ЛОГИКА ВКЛЮЧЕНИЯ (ВЕСЕЛИЙ СМАЙЛ) ---
+                            # 2. За 5 минут до включения
                             diff_end = (end_dt - current_time).total_seconds()
-
-                            if 240 < diff_end <= 300:  # 4-5 минут до конца
+                            if 240 < diff_end <= 300:
                                 next_off_time = "кінця доби"
-
                                 if i + 1 < len(time_periods):
                                     next_period = time_periods[i + 1]
                                     next_off_time = next_period["start"]
@@ -387,7 +333,7 @@ def get_sub_button():
     return InlineKeyboardMarkup(inline_keyboard=kb)
 
 
-# --- ОБРАБОТЧИКИ (HANDLERS) ---
+# --- ОБРАБОТЧИКИ ПОЛЬЗОВАТЕЛЕЙ ---
 
 
 @dp.message(Command("start"))
@@ -395,7 +341,8 @@ async def cmd_start(message: types.Message):
     await save_user(message)
     await message.answer(
         "👋 Привіт! Я бот моніторингу відключень світла (2 черга, 1 підгрупа).\n\n"
-        "Ти можеш перевірити графік або підключити сповіщення за 5 хвилин до відключення або включення світла ✅",
+        "Ти можеш перевірити графік або підключити сповіщення за 5 хвилин "
+        "до відключення або включення світла ✅",
         reply_markup=get_start_keyboard(),
     )
 
@@ -418,7 +365,6 @@ async def cmd_unsub(message: types.Message):
 @dp.callback_query(F.data == "check_2_1")
 async def cb_check(callback: types.CallbackQuery):
     final_text = build_schedule_answer()
-
     try:
         await callback.message.edit_text(
             final_text,
@@ -426,7 +372,6 @@ async def cb_check(callback: types.CallbackQuery):
         )
     except Exception:
         pass
-
     await callback.answer()
 
 
@@ -453,18 +398,17 @@ async def cb_unsub(callback: types.CallbackQuery):
     await callback.answer()
 
 
-# --- СКРЫТАЯ АДМИН-КОМАНДА РАССЫЛКИ ---
+# --- АДМИН: РАССЫЛКА С ПРЕВЬЮ И ОТМЕНОЙ ---
 
 
 @dp.message(Command("adminmsg"))
 async def cmd_adminmsg(message: types.Message):
     """
-    Скрытая команда для рассылки всем подписчикам.
-    Использование: /adminmsg любой текст (можно с HTML разметкой).
-    Работает только для ADMIN_ID.
+    /adminmsg ТЕКСТ
+    1) Сохраняет текст как "ожидающий рассылки"
+    2) Показывает превью + кнопки "Отправить / Отменить"
     """
     if message.from_user.id != ADMIN_ID:
-        # Игнорируем, никакой ошибки пользователю
         return
 
     parts = message.text.split(maxsplit=1)
@@ -473,21 +417,123 @@ async def cmd_adminmsg(message: types.Message):
         return
 
     text = parts[1]
+    pending_admin_messages[ADMIN_ID] = text
 
-    await message.answer("🚀 Надсилаю повідомлення всім підписникам...")
+    kb = InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="✅ Надіслати всім", callback_data="admin_send_confirm"
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    text="❌ Скасувати розсилку", callback_data="admin_send_cancel"
+                )
+            ],
+        ]
+    )
+
+    await message.answer(
+        "📝 <b>Попередній перегляд повідомлення:</b>\n\n"
+        f"{text}\n\n"
+        "Надіслати це повідомлення всім підписникам?",
+        reply_markup=kb,
+    )
+
+
+@dp.message(Command("admincancel"))
+async def cmd_admincancel(message: types.Message):
+    """
+    /admincancel — отмена текущей ожидающей рассылки без нажатия кнопки.
+    """
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    if pending_admin_messages.pop(ADMIN_ID, None) is None:
+        await message.answer("❌ Немає активної розсилки для скасування.")
+    else:
+        await message.answer("❌ Поточну розсилку скасовано.")
+
+
+@dp.callback_query(F.data == "admin_send_cancel")
+async def cb_admin_cancel(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Недостатньо прав.", show_alert=True)
+        return
+
+    if pending_admin_messages.pop(ADMIN_ID, None) is None:
+        await callback.answer("Немає активної розсилки.", show_alert=True)
+        return
+
+    try:
+        await callback.message.edit_text("❌ Розсилку скасовано адміном.")
+    except Exception:
+        pass
+
+    await callback.answer("Розсилку скасовано.")
+
+
+@dp.callback_query(F.data == "admin_send_confirm")
+async def cb_admin_confirm(callback: types.CallbackQuery):
+    if callback.from_user.id != ADMIN_ID:
+        await callback.answer("Недостатньо прав.", show_alert=True)
+        return
+
+    text = pending_admin_messages.pop(ADMIN_ID, None)
+    if not text:
+        await callback.answer("Немає активної розсилки.", show_alert=True)
+        return
 
     subscribers = await get_all_subscribers()
+    total = len(subscribers)
     sent = 0
+
+    try:
+        await callback.message.edit_text("🚀 Починаю розсилку всім підписникам...")
+    except Exception:
+        pass
 
     for user_id in subscribers:
         try:
             await bot.send_message(user_id, text)
             sent += 1
-            await asyncio.sleep(0.05)  # маленькая пауза против flood limit
+            await asyncio.sleep(0.05)  # анти-флуд
         except Exception as e:
             logging.error(f"Не вдалося надіслати {user_id}: {e}")
 
-    await message.answer(f"✅ Розсилка завершена. Надіслано: {sent}")
+    # Итоговая статистика тебе в личку
+    await bot.send_message(
+        ADMIN_ID,
+        f"✅ Розсилка завершена.\n"
+        f"👥 Підписників загалом: <b>{total}</b>\n"
+        f"📨 Успішно надіслано: <b>{sent}</b>",
+    )
+
+    await callback.answer("Розсилку завершено ✅")
+
+
+# --- АДМИН: СТАТИСТИКА ---
+
+
+@dp.message(Command("adminstats"))
+async def cmd_adminstats(message: types.Message):
+    if message.from_user.id != ADMIN_ID:
+        return
+
+    if db_pool is None:
+        await message.answer("База ще не ініціалізована.")
+        return
+
+    async with db_pool.acquire() as conn:
+        users_count = await conn.fetchval("SELECT COUNT(*) FROM users;")
+        subs_count = await conn.fetchval("SELECT COUNT(*) FROM subscribers;")
+
+    await message.answer(
+        "📊 <b>Статистика бота</b>:\n"
+        f"👥 Користувачів у таблиці <code>users</code>: <b>{users_count}</b>\n"
+        f"🔔 Підписників у таблиці <code>subscribers</code>: <b>{subs_count}</b>"
+    )
 
 
 # --- ЗАПУСК ---
@@ -495,13 +541,8 @@ async def cmd_adminmsg(message: types.Message):
 
 async def main():
     print("🤖 Бот запускается...")
-
-    # Инициализируем БД и таблицы
     await init_db()
-
-    # Запускаем фоновый монитор
     asyncio.create_task(monitor_schedule_task())
-
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)
 
