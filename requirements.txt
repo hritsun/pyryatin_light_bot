@@ -1,4 +1,6 @@
 aiogram
-beautifulsoup4
+asyncpg
+python-dotenv
 requests
-cloudscraper
+beautifulsoup4
+urllib3
